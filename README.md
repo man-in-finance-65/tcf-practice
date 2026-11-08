@@ -61,4 +61,4 @@ Then open <http://localhost:8000>.
 
 **Saved data:** only the API key, the error log (`tcf.errorLog.v1`) and the position in the EE prompt cycle are stored. Everything else, including the session timer and current level, resets when you reload the page.
 
-**SDK:** `@anthropic-ai/sdk` is loaded from esm.sh, pinned to version 1.2.0 so an SDK update can't silently break the site.
+**SDK:** `@anthropic-ai/sdk` is loaded from esm.sh as a single bundled file (`?bundle`), pinned to version 1.2.0 so an SDK update can't silently break the site. It downloads in the background, so the first screen doesn't wait for it.

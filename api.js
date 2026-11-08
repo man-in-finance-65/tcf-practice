@@ -1,7 +1,24 @@
 // Claude API wrapper: key storage, JSON generation, streaming, and the shared
 // "spinner → error → Try again" UI that every API call goes through.
-import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@1.2.0';
 import { RUNTIME_NOTE } from './prompts.js';
+
+// ?bundle makes esm.sh serve the SDK as one file instead of ~165 small modules,
+// which phones on mobile data fetch slowly one after another.
+const SDK_URL = 'https://esm.sh/@anthropic-ai/sdk@1.2.0?bundle';
+let sdk = null;
+
+// Loaded on first API call (and preloaded by index.html), so the key and home
+// screens never wait for the ~120 KB library.
+async function loadSdk() {
+  if (!sdk) {
+    try {
+      sdk = (await import(SDK_URL)).default;
+    } catch (err) {
+      throw new Error(`Could not load the Claude library from esm.sh. Check your internet connection.\nDetails: ${err.message}`);
+    }
+  }
+  return sdk;
+}
 
 const MODEL = 'claude-sonnet-4-6';
 const KEY_STORAGE = 'tcf.apiKey';
@@ -27,7 +44,7 @@ export function maskedKey() {
 
 // A fresh client per call: the key is read from localStorage at call time and
 // never kept in a long-lived variable.
-function client() {
+function client(Anthropic) {
   const apiKey = localStorage.getItem(KEY_STORAGE);
   if (!apiKey) throw new Error('No API key saved. Go back to the home screen and enter it.');
   // The SDK refuses to run in a browser unless told to: it means the key is visible
@@ -51,16 +68,17 @@ function systemBlocks(skillPrompt) {
  * `validate(obj)` should throw with a readable message if the shape is wrong.
  */
 export async function generateJSON(skillPrompt, userMessage, { maxTokens = 16000, validate } = {}) {
+  const Anthropic = await loadSdk();
   let msg;
   try {
-    msg = await client().messages.create({
+    msg = await client(Anthropic).messages.create({
       model: MODEL,
       max_tokens: maxTokens,
       system: systemBlocks(skillPrompt),
       messages: [{ role: 'user', content: userMessage }],
     });
   } catch (err) {
-    throw describeError(err);
+    throw describeError(err, Anthropic);
   }
   checkStop(msg.stop_reason);
 
@@ -87,9 +105,10 @@ export async function generateJSON(skillPrompt, userMessage, { maxTokens = 16000
  * re-render feedback section by section as it arrives.
  */
 export async function streamText(skillPrompt, userMessage, onText, { maxTokens = 16000 } = {}) {
+  const Anthropic = await loadSdk();
   let full = '';
   try {
-    const stream = client().messages.stream({
+    const stream = client(Anthropic).messages.stream({
       model: MODEL,
       max_tokens: maxTokens,
       system: systemBlocks(skillPrompt),
@@ -106,7 +125,7 @@ export async function streamText(skillPrompt, userMessage, onText, { maxTokens =
     const msg = await stream.finalMessage();
     checkStop(msg.stop_reason);
   } catch (err) {
-    throw describeError(err);
+    throw describeError(err, Anthropic);
   }
   return full;
 }
@@ -121,7 +140,7 @@ function checkStop(stopReason) {
 }
 
 // Turn SDK errors into messages that say what happened and what to do.
-function describeError(err) {
+function describeError(err, Anthropic) {
   if (!(err instanceof Anthropic.APIError)) return err instanceof Error ? err : new Error(String(err));
   const detail = err.error?.error?.message || err.message;
   let msg;
