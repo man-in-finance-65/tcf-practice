@@ -14,6 +14,7 @@ export function start(container) {
   let alive = true;
   let quiz = null;
   startHuberman();
+  warmUpVoices();
 
   const run = async () => {
     container.innerHTML = `
@@ -46,35 +47,39 @@ export function start(container) {
 
     const playBtn = body.querySelector('.play');
     const status = body.querySelector('.audio-status');
-    await new Promise((resolve) => {
-      playBtn.onclick = () => {
+    const audioBar = body.querySelector('.audio-bar');
+    const audioDone = await new Promise((resolve) => {
+      // Runs straight from a tap (Play or Try again): iOS requires that.
+      const play = () => {
         playBtn.disabled = true;
         speak(data.script, {
           onStatus: (s) => { status.textContent = s; },
-          onEnd: resolve,
+          onEnd: () => resolve('Audio finished.'),
           onError: (msg) => {
             // Never strand the learner: say what failed, allow a retry or reading the script.
-            status.innerHTML = '';
+            status.textContent = '';
             const box = document.createElement('div');
             box.className = 'error-box';
             box.innerHTML = `<p>${esc(msg)}</p>`;
             const retry = document.createElement('button');
             retry.textContent = 'Try again';
-            retry.onclick = () => { box.remove(); playBtn.disabled = false; };
+            retry.onclick = () => { box.remove(); play(); };
             const read = document.createElement('button');
             read.textContent = 'Read the script instead';
             read.onclick = () => {
-              box.replaceWith(Object.assign(document.createElement('blockquote'), { textContent: data.script }));
-              resolve();
+              box.remove();
+              audioBar.after(Object.assign(document.createElement('blockquote'), { textContent: data.script }));
+              resolve('Reading the script instead of listening.');
             };
             box.append(retry, read);
-            status.append(box);
+            audioBar.after(box);
           },
         });
       };
+      playBtn.onclick = play;
     });
     if (!alive) return;
-    status.textContent = 'Audio finished.';
+    status.textContent = audioDone;
 
     const answers = await quiz.start();
     if (!alive) return;
@@ -100,45 +105,73 @@ export function start(container) {
 
 // ---------- Text-to-speech ----------
 
-function pickFrenchVoice() {
-  return new Promise((resolve) => {
-    const choose = () => {
-      const voices = speechSynthesis.getVoices();
-      return voices.find((v) => v.lang === 'fr-FR') || voices.find((v) => v.lang === 'fr-CA') ||
-        voices.find((v) => v.lang?.toLowerCase().startsWith('fr')) || null;
-    };
-    if (speechSynthesis.getVoices().length) return resolve(choose());
-    // Voices load asynchronously in Chrome; don't wait forever if none arrive.
-    const t = setTimeout(() => resolve(choose()), 1500);
-    speechSynthesis.addEventListener('voiceschanged', () => { clearTimeout(t); resolve(choose()); }, { once: true });
-  });
+// Voices load asynchronously (Safari only starts after the first getVoices call).
+// Asking when CO opens means they're ready by the time the learner taps Play,
+// so speak() never has to wait.
+function warmUpVoices() {
+  if ('speechSynthesis' in window) speechSynthesis.getVoices();
+}
+
+function frenchVoice() {
+  const voices = speechSynthesis.getVoices();
+  return voices.find((v) => v.lang === 'fr-FR') || voices.find((v) => v.lang === 'fr-CA') ||
+    voices.find((v) => v.lang?.toLowerCase().replace('_', '-').startsWith('fr')) || null;
 }
 
 const liveUtterances = []; // Chrome can garbage-collect utterances and never fire onend.
 
-async function speak(script, { onStatus, onEnd, onError }) {
+// Must run synchronously inside the tap handler, with no await before speak():
+// iOS Safari only plays speech started directly by a user gesture and otherwise
+// does nothing at all, without firing any error.
+function speak(script, { onStatus, onEnd, onError }) {
   if (!('speechSynthesis' in window)) {
     onError('This browser has no text-to-speech (Web Speech API), so the audio can’t play.');
     return;
   }
-  const voice = await pickFrenchVoice();
-  speechSynthesis.cancel();
+  let started = false;
+  let finished = false;
+  const fail = (msg) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(watchdog);
+    speechSynthesis.cancel();
+    onError(msg);
+  };
+
+  const voice = frenchVoice();
+  // Safari can drop an utterance queued right after cancel(), so only cancel if needed.
+  if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
   // Chrome stops long utterances after ~15 s, so speak sentence by sentence.
-  const parts = script.match(/[^.!?]+[.!?]*/g)?.map((s) => s.trim()).filter(Boolean) || [script];
+  const parts = script.match(/[^.!?]+[.!?]*/g)?.map((t) => t.trim()).filter(Boolean) || [script];
   liveUtterances.length = 0;
   parts.forEach((text, i) => {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = voice?.lang || 'fr-FR';
     if (voice) u.voice = voice;
     u.rate = 0.95;
-    if (i === parts.length - 1) u.onend = () => onEnd();
+    u.onstart = () => { started = true; };
+    if (i === parts.length - 1) {
+      u.onend = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(watchdog);
+        onEnd();
+      };
+    }
     u.onerror = (e) => {
       if (e.error === 'canceled' || e.error === 'interrupted') return; // we cancelled it ourselves
-      speechSynthesis.cancel();
-      onError(`The audio failed to play (${e.error}).`);
+      fail(`The audio failed to play (${e.error}).`);
     };
     liveUtterances.push(u);
     speechSynthesis.speak(u);
   });
-  onStatus(voice ? `Playing… (voice: ${voice.name})` : 'Playing… (no French voice installed — pronunciation may be off)');
+  onStatus(voice ? `Playing… (voice: ${voice.name})` : 'Playing… (no French voice found on this device — pronunciation may be off)');
+
+  // A blocked or broken speech engine fires no event at all. Without this the
+  // questions would stay locked forever with no explanation.
+  const watchdog = setTimeout(() => {
+    if (!started) {
+      fail('The audio didn’t start. Turn the volume up and check your phone isn’t on silent, then tap Try again. If it still doesn’t play, read the script instead.');
+    }
+  }, 5000);
 }
